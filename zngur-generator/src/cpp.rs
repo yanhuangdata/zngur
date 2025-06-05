@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fmt::{Display, Write},
-    iter,
+    iter, panic,
 };
 
 use itertools::Itertools;
@@ -243,6 +243,24 @@ impl CppFnSig {
         Ok(())
     }
 
+    fn emit_zngur_dyn_api_assign(&self, state: &mut State) -> std::fmt::Result {
+        write!(
+            state,
+            r###"{link_name} = reinterpret_cast<decltype(&::{link_name})>(dlsym(dylib_handle, "{link_name}"));"###,
+            link_name = self.rust_link_name
+        )?;
+        Ok(())
+    }
+
+    fn emit_zngur_dyn_api_field(&self, state: &mut State) -> std::fmt::Result {
+        write!(
+            state,
+            r###"decltype(&::{link_name}) {link_name};"###,
+            link_name = self.rust_link_name
+        )?;
+        Ok(())
+    }
+
     fn emit_cpp_header(&self, state: &mut State, fn_name: &str) -> std::fmt::Result {
         let CppFnSig {
             inputs,
@@ -251,7 +269,12 @@ impl CppFnSig {
         } = self;
         writeln!(
             state,
-            "{output} {fn_name}({input_defs}) noexcept ;",
+            "{output} {fn_name}({dyn_api_def}{input_defs}) noexcept ;",
+            dyn_api_def = if inputs.is_empty() {
+                "__zngur_dyn_api* api"
+            } else {
+                "__zngur_dyn_api* api, "
+            },
             input_defs = inputs
                 .iter()
                 .enumerate()
@@ -268,14 +291,19 @@ impl CppFnSig {
         } = self;
         writeln!(
             state,
-            "inline {output} {fn_name}({input_defs}) noexcept {{
+            "inline {output} {fn_name}({dyn_api_def}{input_defs}) noexcept {{
             {output} o{{}};
             {deinits}
-            {rust_link_name}({input_args}::rust::__zngur_internal_data_ptr(o));
+            api->{rust_link_name}({input_args}::rust::__zngur_internal_data_ptr(o));
             {panic_handler}
             ::rust::__zngur_internal_assume_init(o);
             return o;
         }}",
+            dyn_api_def = if inputs.is_empty() {
+                "__zngur_dyn_api* api"
+            } else {
+                "__zngur_dyn_api* api, "
+            },
             input_defs = inputs
                 .iter()
                 .enumerate()
@@ -751,7 +779,12 @@ inline {ty}({as_std_function} f);
                     } = &method.sig;
                     writeln!(
                         state,
-                        "{output} {fn_name}({input_defs}) const noexcept ;",
+                        "{output} {fn_name}({dyn_api_def}{input_defs}) const noexcept ;",
+                        dyn_api_def = if inputs.len().saturating_sub(1) == 0 {
+                            "__zngur_dyn_api* api"
+                        } else {
+                            "__zngur_dyn_api* api, "
+                        },
                         fn_name = &method.name,
                         input_defs = inputs
                             .iter()
@@ -1054,8 +1087,13 @@ private:
                     } = &method.sig;
                     writeln!(
                         state,
-                        "{output} {fn_name}({input_defs}) {const_kw} noexcept ;",
+                        "{output} {fn_name}({dyn_api_def}{input_defs}) {const_kw} noexcept ;",
                         fn_name = &method.name,
+                        dyn_api_def = if inputs.len().saturating_sub(1) == 0 {
+                            "__zngur_dyn_api* api"
+                        } else {
+                            "__zngur_dyn_api* api, "
+                        },
                         input_defs = inputs
                             .iter()
                             .skip(1)
@@ -1201,11 +1239,16 @@ namespace rust {{
             } = c;
             writeln!(
                 state,
-                "inline {fn_name}({input_defs}) noexcept {{
+                "inline {fn_name}({dyn_api_def}{input_defs}) noexcept {{
             ::rust::__zngur_internal_assume_init(*this);
             {rust_link_name}({input_args}::rust::__zngur_internal_data_ptr(*this));
             {deinits}
         }}",
+                dyn_api_def = if inputs.len().saturating_sub(1) == 0 {
+                    "__zngur_dyn_api* api"
+                } else {
+                    "__zngur_dyn_api* api, "
+                },
                 input_defs = inputs
                     .iter()
                     .enumerate()
@@ -1369,11 +1412,16 @@ auto data_as_impl = &args;
                     } = &method.sig;
                     writeln!(
                         state,
-                        "inline {output} rust::{ref_kind}< {ty} >::{method_name}({input_defs}) const noexcept {{
-                    return {fn_name}(*this{input_args});
+                        "inline {output} rust::{ref_kind}< {ty} >::{method_name}({dyn_api_def}{input_defs}) const noexcept {{
+                    return {fn_name}(api, *this{input_args});
                 }}",
                         ty = &self.ty,
                         method_name = &method.name,
+                        dyn_api_def = if inputs.len().saturating_sub(1) == 0 {
+                            "__zngur_dyn_api* api"
+                        } else {
+                            "__zngur_dyn_api* api, "
+                        },
                         input_defs = inputs
                             .iter()
                             .skip(1)
@@ -1397,13 +1445,18 @@ auto data_as_impl = &args;
                 } = &method.sig;
                 writeln!(
                     state,
-                    "inline {output} {fn_name}({input_defs}) {const_kw} noexcept {{
-                    return {fn_name}({this_arg}{input_args});
+                    "inline {output} {fn_name}({dyn_api_def}{input_defs}) {const_kw} noexcept {{
+                    return {fn_name}(api, {this_arg}{input_args});
                 }}",
                     this_arg = match method.kind {
                         ZngurMethodReceiver::Ref(_) => "*this",
                         ZngurMethodReceiver::Move => "::std::move(*this)",
                         ZngurMethodReceiver::Static => unreachable!(),
+                    },
+                    dyn_api_def = if inputs.len().saturating_sub(1) == 0 {
+                        "__zngur_dyn_api* api"
+                    } else {
+                        "__zngur_dyn_api* api, "
                     },
                     input_defs = inputs
                         .iter()
@@ -1516,6 +1569,46 @@ auto data_as_impl = &args;
         Ok(())
     }
 
+    fn get_link_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = Vec::new();
+        for method in &self.methods {
+            names.push(&method.sig.rust_link_name);
+        }
+        for c in &self.constructors {
+            names.push(&c.rust_link_name);
+        }
+        assert!(
+            self.cpp_value.is_none(),
+            "C++ value not implemented for dyn api"
+        );
+        if let CppLayoutPolicy::HeapAllocated {
+            size_fn,
+            alloc_fn,
+            free_fn,
+        } = &self.layout
+        {
+            names.push(size_fn);
+            names.push(alloc_fn);
+            names.push(free_fn);
+        }
+        for tr in &self.wellknown_traits {
+            match tr {
+                ZngurWellknownTraitData::Debug {
+                    pretty_print,
+                    debug_print,
+                } => {
+                    names.push(pretty_print);
+                    names.push(debug_print);
+                }
+                ZngurWellknownTraitData::Unsized | ZngurWellknownTraitData::Copy => (),
+                ZngurWellknownTraitData::Drop { drop_in_place } => {
+                    names.push(drop_in_place);
+                }
+            }
+        }
+        return names;
+    }
+
     fn emit_rust_links(&self, state: &mut State) -> std::fmt::Result {
         for method in &self.methods {
             method.sig.emit_rust_link_decl(state)?;
@@ -1583,10 +1676,11 @@ impl CppFile {
 #include <iostream>
 #include <functional>
 #include <math.h>
+#include <dlfcn.h>
 "#;
         state.text += &self.additional_includes;
         if self.panic_to_exception {
-            state.text += r#"
+            state.text += indoc::indoc! { r#"
             namespace rust {
                 class Panic {};
             }
@@ -1594,7 +1688,7 @@ impl CppFile {
                 uint8_t __zngur_detect_panic();
                 void __zngur_take_panic();
             }
-            "#;
+            "#};
         }
         state.text += r#"
 #define zngur_dbg(x) (::rust::zngur_dbg_impl(__FILE__, __LINE__, #x, x))
@@ -1816,6 +1910,54 @@ namespace rust {
             td.emit_rust_links(state)?;
         }
         writeln!(state, "}}")?;
+
+        writeln!(state, "class __zngur_dyn_api {{")?;
+        writeln!(state, "public:")?;
+        // constructor
+        writeln!(
+            state,
+            "  __zngur_dyn_api(void *dylib_handle) : _dylib_handle(dylib_handle) {{"
+        )?;
+        for f in &self.fn_defs {
+            write!(state, "    ")?;
+            f.sig.emit_zngur_dyn_api_assign(state)?;
+            writeln!(state)?;
+        }
+        for td in &self.type_defs {
+            for n in td.get_link_names() {
+                writeln!(
+                    state,
+                    r###"    {link_name} = reinterpret_cast<decltype(&::{link_name})>(dlsym(dylib_handle, "{link_name}"));"###,
+                    link_name = n,
+                )?;
+            }
+        }
+        if !self.trait_defs.is_empty() {
+            panic!("zngur dyn api has not implemented for trait_defs yet.");
+        }
+        writeln!(state, "\n")?;
+        writeln!(state, "  }}")?;
+
+        // fields
+        writeln!(state, "  const void * _dylib_handle;")?;
+        for f in &self.fn_defs {
+            write!(state, "  ")?;
+            f.sig.emit_zngur_dyn_api_field(state)?;
+            writeln!(state)?;
+        }
+        for td in &self.type_defs {
+            for n in td.get_link_names() {
+                writeln!(
+                    state,
+                    r###"  decltype(&::{link_name}) {link_name};"###,
+                    link_name = n,
+                )?;
+            }
+        }
+
+        writeln!(state, "\n")?;
+        writeln!(state, "}};")?;
+
         for td in &self.type_defs {
             td.ty.emit_header(state)?;
         }
