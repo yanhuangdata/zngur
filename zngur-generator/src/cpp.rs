@@ -1,10 +1,10 @@
+use indoc::indoc;
+use itertools::Itertools;
 use std::{
     collections::HashMap,
     fmt::{Display, Write},
     iter, panic,
 };
-
-use itertools::Itertools;
 use zngur_def::{Mutability, RustTrait, ZngurField, ZngurMethodReceiver};
 
 use crate::{ZngurWellknownTraitData, rust::IntoCpp};
@@ -240,15 +240,6 @@ impl CppFnSig {
     fn emit_rust_link_decl(&self, state: &mut State) -> std::fmt::Result {
         self.emit_rust_link(state)?;
         writeln!(state, " noexcept ;")?;
-        Ok(())
-    }
-
-    fn emit_zngur_dyn_api_assign(&self, state: &mut State) -> std::fmt::Result {
-        write!(
-            state,
-            r###"{link_name} = reinterpret_cast<decltype(&::{link_name})>(dlsym(dylib_handle, "{link_name}"));"###,
-            link_name = self.rust_link_name
-        )?;
         Ok(())
     }
 
@@ -1916,30 +1907,11 @@ namespace rust {
         // constructor
         writeln!(
             state,
-            "  __zngur_dyn_api(void *dylib_handle) : _dylib_handle(dylib_handle) {{"
+            "  explicit __zngur_dyn_api(void *dylib_handle) : _dylib_handle(dylib_handle) {{}}"
         )?;
-        for f in &self.fn_defs {
-            write!(state, "    ")?;
-            f.sig.emit_zngur_dyn_api_assign(state)?;
-            writeln!(state)?;
-        }
-        for td in &self.type_defs {
-            for n in td.get_link_names() {
-                writeln!(
-                    state,
-                    r###"    {link_name} = reinterpret_cast<decltype(&::{link_name})>(dlsym(dylib_handle, "{link_name}"));"###,
-                    link_name = n,
-                )?;
-            }
-        }
-        if !self.trait_defs.is_empty() {
-            panic!("zngur dyn api has not implemented for trait_defs yet.");
-        }
-        writeln!(state, "\n")?;
-        writeln!(state, "  }}")?;
 
         // fields
-        writeln!(state, "  const void * _dylib_handle;")?;
+        writeln!(state, "  void * _dylib_handle;")?;
         for f in &self.fn_defs {
             write!(state, "  ")?;
             f.sig.emit_zngur_dyn_api_field(state)?;
@@ -1956,6 +1928,41 @@ namespace rust {
         }
 
         writeln!(state, "\n")?;
+
+        // functions
+        writeln!(state, "  bool init(std::string &error_message) {{")?;
+        let write_link_name = |state: &mut State, link_name: &str| {
+            writeln!(
+                state,
+                indoc! { r###"
+                    {{
+                    void* dlsym_handle = dlsym(_dylib_handle, "{link_name}");
+                    if (dlsym_handle == nullptr) {{
+                        error_message = "Failed to load {link_name} from dynamic library: " + std::string(dlerror());
+                        return false;
+                    }}
+                    {link_name} = reinterpret_cast<decltype(&::{link_name})>(dlsym_handle);
+                    }}
+                "###},
+                link_name = link_name,
+            )
+        };
+        for f in &self.fn_defs {
+            write_link_name(state, &f.sig.rust_link_name)?;
+        }
+        for td in &self.type_defs {
+            for n in td.get_link_names() {
+                write_link_name(state, n)?;
+            }
+        }
+        writeln!(state, "  return true;")?;
+        writeln!(state, "  }}")?;
+
+        if !self.trait_defs.is_empty() {
+            panic!("zngur dyn api has not implemented for trait_defs yet.");
+        }
+        writeln!(state, "\n")?;
+
         writeln!(state, "}};")?;
 
         for td in &self.type_defs {
